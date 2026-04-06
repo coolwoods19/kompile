@@ -1,0 +1,20 @@
+# KOMPILE configuration
+# Copy this file and set your ANTHROPIC_API_KEY
+
+api_key: ""  # or set ANTHROPIC_API_KEY env var
+
+models:
+  filter: "claude-haiku-4-5-20251001"       # cheap + fast: filtering and tagging
+  summarize: "claude-sonnet-4-20250514"     # mid-range: per-source extraction
+  compile: "claude-sonnet-4-20250514"       # mid-range: cross-source synthesis
+  query: "claude-sonnet-4-20250514"         # mid-range: MCP Q&A and demo Q&A
+
+paths:
+  raw: "raw"
+  wiki: "wiki"
+
+# Context window safety: never exceed this fraction in a single call
+context_window_limit: 0.5
+
+# Compilation: if total summary tokens exceed this, chunk by topic
+chunk_threshold_tokens: 80000

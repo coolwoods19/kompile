@@ -1,0 +1,23 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background-color: #0d1117;
+  color: #e6edf3;
+  font-family: 'Inter', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Markdown article styles */
+.article-body h1 { font-size: 1.25rem; font-weight: 700; color: #fff; margin-top: 1.5rem; margin-bottom: 0.75rem; }
+.article-body h2 { font-size: 1.1rem; font-weight: 600; color: #e2e8f0; margin-top: 1.25rem; margin-bottom: 0.5rem; }
+.article-body h3 { font-size: 1rem; font-weight: 600; color: #cbd5e1; margin-top: 1rem; margin-bottom: 0.5rem; }
+.article-body p { color: #94a3b8; line-height: 1.7; margin-bottom: 0.75rem; }
+.article-body ul, .article-body ol { color: #94a3b8; margin-bottom: 0.75rem; padding-left: 1.5rem; }
+.article-body li { line-height: 1.7; }
+.article-body strong { color: #e2e8f0; font-weight: 600; }
+.article-body em { color: #94a3b8; font-style: italic; }
+.article-body code { background: #1e293b; color: #34d399; padding: 0 4px; border-radius: 3px; font-size: 0.85em; font-family: 'JetBrains Mono', monospace; }
