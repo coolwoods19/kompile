@@ -28,7 +28,7 @@ export default function App() {
             </span>
           </div>
           <a
-            href="https://github.com/yourusername/kompile"
+            href="https://github.com/coolwoods19/kompile"
             target="_blank"
             rel="noopener noreferrer"
             style={{ color: "#8b949e", fontSize: "0.8rem", textDecoration: "none" }}

@@ -56,7 +56,7 @@ export default function About() {
       </div>
 
       <div style={{ borderTop: "1px solid #21262d", paddingTop: "1rem", display: "flex", gap: "1rem", alignItems: "center" }}>
-        <a href="https://github.com/yourusername/kompile" target="_blank" rel="noopener noreferrer"
+        <a href="https://github.com/coolwoods19/kompile" target="_blank" rel="noopener noreferrer"
           style={{ fontSize: "0.82rem", color: "#58a6ff", textDecoration: "none" }}>
           GitHub ↗
         </a>
