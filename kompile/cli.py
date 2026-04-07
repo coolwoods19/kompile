@@ -165,8 +165,8 @@ def filter_cmd(ctx):
         click.echo(f"\nFiltered {len(results)} sources: {kept} kept, {len(results)-kept} discarded.")
 
     # Always re-classify (filter results may have changed)
-    click.echo("\nClassifying topics into depth tiers...")
-    classifications = classify_topics(state["filter_results"])
+    click.echo("\nNormalizing and classifying topics...")
+    classifications = classify_topics(state["filter_results"], client=client, model=model)
     state_add_tier_classifications(state, classifications)
     save_state(root, state)
 
@@ -231,7 +231,10 @@ def compile(ctx, incremental):
     # ------------------------------------------------------------------ #
     tier_classifications = state_get_tier_classifications(state)
     if not tier_classifications or unfiltered:
-        tier_classifications = classify_topics(state["filter_results"])
+        click.echo("Normalizing and classifying topics...")
+        tier_classifications = classify_topics(
+            state["filter_results"], client=client, model=cfg["models"]["filter"]
+        )
         state_add_tier_classifications(state, tier_classifications)
         save_state(root, state)
 

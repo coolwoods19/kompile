@@ -1,12 +1,12 @@
 """Filter sources using Haiku — keep/discard + topic tags + summary."""
 from __future__ import annotations
 
-import json
 from typing import Callable
 
 import anthropic
 
 from kompile.models import FilterResult, Source
+from kompile.utils import parse_llm_json
 from .prompts import FILTER_SYSTEM, FILTER_USER
 
 # Haiku context window ~200K; hard limit at 50% = 100K tokens
@@ -28,17 +28,11 @@ def filter_source(
     )
     response = client.messages.create(
         model=model,
-        max_tokens=256,
+        max_tokens=1024,
         system=FILTER_SYSTEM,
         messages=[{"role": "user", "content": user_msg}],
     )
-    raw = response.content[0].text.strip()
-    # Strip markdown fences if model added them
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    data = json.loads(raw)
+    data = parse_llm_json(response.content[0].text)
     return FilterResult(
         source_id=source.id,
         keep=bool(data.get("keep", False)),

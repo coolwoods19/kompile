@@ -1,12 +1,13 @@
 """Summarize kept sources using Sonnet — extract claims, frameworks, key terms."""
 from __future__ import annotations
 
-import json
+import time
 from typing import Callable
 
 import anthropic
 
 from kompile.models import Claim, FilterResult, Source, SourceSummary
+from kompile.utils import parse_llm_json
 from .prompts import SUMMARIZE_SYSTEM, SUMMARIZE_USER
 
 MAX_CONTENT_CHARS = 160_000  # ~40K tokens, within Sonnet's 200K window at 50% limit
@@ -24,18 +25,30 @@ def summarize_source(
         date=source.date,
         content=content,
     )
-    response = client.messages.create(
-        model=model,
-        max_tokens=1024,
-        system=SUMMARIZE_SYSTEM,
-        messages=[{"role": "user", "content": user_msg}],
-    )
-    raw = response.content[0].text.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    data = json.loads(raw)
+    for attempt in range(5):
+        try:
+            response = client.messages.create(
+                model=model,
+                max_tokens=8096,
+                system=SUMMARIZE_SYSTEM,
+                messages=[{"role": "user", "content": user_msg}],
+            )
+            break
+        except anthropic.RateLimitError:
+            if attempt == 4:
+                raise
+            wait = 60 * (attempt + 1)
+            print(f"    Rate limited — waiting {wait}s before retry...")
+            time.sleep(wait)
+    try:
+        data = parse_llm_json(response.content[0].text)
+    except Exception as e:
+        print(f"    Warning: bad JSON for '{source.title[:60]}': {e}")
+        return SourceSummary(
+            source_id=source.id, platform=source.platform,
+            title=source.title, date=source.date,
+            claims=[], frameworks=[], key_terms=[],
+        )
 
     claims = [
         Claim(

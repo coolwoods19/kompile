@@ -68,6 +68,28 @@ def slugify(name: str) -> str:
     return combined
 
 
+def parse_llm_json(raw: str) -> dict | list:
+    """Parse JSON from an LLM response robustly.
+
+    Strips markdown fences, then uses json-repair to fix common LLM issues
+    (unescaped quotes/newlines in strings, trailing commas, etc.).
+    Raises ValueError if the result is not a dict or list.
+    """
+    from json_repair import repair_json
+
+    text = raw.strip()
+    # Strip markdown fences
+    if text.startswith("```"):
+        text = text[text.index("\n") + 1:] if "\n" in text else text[3:]
+        if text.endswith("```"):
+            text = text[:-3]
+    text = text.strip()
+    result = repair_json(text, return_objects=True)
+    if not isinstance(result, (dict, list)):
+        raise ValueError(f"Expected JSON object or array, got: {type(result)}")
+    return result
+
+
 def _cjk_to_slug(char: str) -> str:
     """Convert a single CJK character to a pinyin slug or hash fallback."""
     try:

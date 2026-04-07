@@ -30,7 +30,7 @@ from kompile.models import (
     ActiveNote, Article, ArticleSource, Concept, Domain,
     Gap, Insight, SourceSummary, Subtopic, WikiCompilation,
 )
-from kompile.utils import slugify
+from kompile.utils import parse_llm_json, slugify
 from .prompts import (
     ACTIVE_COMPILE_SYSTEM, ACTIVE_COMPILE_USER,
     COMPILE_SYSTEM, COMPILE_USER,
@@ -117,16 +117,11 @@ def _call_compile_domain(
     user_msg = COMPILE_USER.format(domain_name=domain_name, summaries_json=summaries_json)
     response = client.messages.create(
         model=model,
-        max_tokens=8192,
+        max_tokens=16000,
         system=COMPILE_SYSTEM,
         messages=[{"role": "user", "content": user_msg}],
     )
-    raw = response.content[0].text.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    data = json.loads(raw)
+    data = parse_llm_json(response.content[0].text)
     return _parse_domain_wiki(data, domain_name, known_ids)
 
 
@@ -223,12 +218,7 @@ def compile_active_topic(
         system=ACTIVE_COMPILE_SYSTEM,
         messages=[{"role": "user", "content": user_msg}],
     )
-    raw = response.content[0].text.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    data = json.loads(raw)
+    data = parse_llm_json(response.content[0].text)
 
     # Collect sources from all input summaries
     sources = [
@@ -269,12 +259,7 @@ def compile_cross_domain(
         system=CROSS_DOMAIN_SYSTEM,
         messages=[{"role": "user", "content": user_msg}],
     )
-    raw = response.content[0].text.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    return json.loads(raw)
+    return parse_llm_json(response.content[0].text)
 
 
 def compile_incremental(
@@ -301,9 +286,4 @@ def compile_incremental(
         system=INCREMENTAL_SYSTEM,
         messages=[{"role": "user", "content": user_msg}],
     )
-    raw = response.content[0].text.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    return json.loads(raw)
+    return parse_llm_json(response.content[0].text)

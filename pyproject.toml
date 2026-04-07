@@ -16,6 +16,7 @@ dependencies = [
     "trafilatura>=1.6.0",
     "youtube-transcript-api>=0.6.0",
     "pypinyin>=0.49.0",
+    "json-repair>=0.30.0",
 ]
 
 [project.scripts]
