@@ -12,8 +12,8 @@ venv/
 .kompile_state.json
 raw/
 
-# Wiki (user data — user decides whether to git-track)
-# wiki/
+# Wiki (personal knowledge base — not tracked)
+wiki/
 
 # Demo
 demo/node_modules/
