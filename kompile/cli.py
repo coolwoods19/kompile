@@ -10,7 +10,8 @@ from kompile.config import load_config
 from kompile.state import (
     load_state, save_state,
     state_add_sources, state_add_filter_results, state_add_summaries,
-    state_get_summaries, state_unfiltered_source_ids, state_unsummarized_kept_ids,
+    state_get_summaries, state_unfiltered_source_ids,
+    state_add_tier_classifications, state_get_tier_classifications,
 )
 
 
@@ -36,17 +37,18 @@ def cli(ctx, config):
 @cli.command()
 @click.argument("path")
 @click.option("--type", "source_type",
-              type=click.Choice(["claude", "chatgpt", "claude_code", "raw", "auto"]),
+              type=click.Choice(["claude", "chatgpt", "claude_code", "article", "youtube", "raw", "auto"]),
               default="auto", help="Source type (default: auto-detect)")
 @click.pass_context
 def ingest(ctx, path, source_type):
-    """Parse source files and add them to the raw/ staging area."""
+    """Parse source files, URLs, or directories and add them to the raw/ staging area."""
     from kompile.ingest import (
         parse_claude_export, parse_chatgpt_export,
         parse_claude_code_directory, parse_raw_file,
+        parse_article_url, parse_youtube_url,
     )
     from kompile.ingest.raw import parse_raw_text
-    import shutil
+    from kompile.ingest.router import route_input
 
     cfg = ctx.obj["config"]
     root = ctx.obj["root"]
@@ -54,47 +56,49 @@ def ingest(ctx, path, source_type):
     raw_dir.mkdir(exist_ok=True)
     state = load_state(root)
 
-    p = Path(path)
-    if not p.exists():
-        click.echo(f"Error: path does not exist: {path}", err=True)
-        sys.exit(1)
-
-    # Auto-detect type
+    # Auto-detect type via router
     if source_type == "auto":
-        if p.suffix.lower() in (".zip", "") and p.is_file():
-            # Heuristic: check filename
-            name = p.name.lower()
-            if "claude" in name and "code" not in name:
-                source_type = "claude"
-            elif "chatgpt" in name or "gpt" in name or "openai" in name:
-                source_type = "chatgpt"
-            else:
-                source_type = "claude"  # default
-        elif p.is_dir():
-            source_type = "claude_code"
-        elif p.suffix.lower() in (".md", ".txt"):
-            source_type = "raw"
-        else:
-            source_type = "raw"
+        source_type = route_input(path)
 
     sources = []
-    if source_type == "claude":
-        sources = parse_claude_export(p)
-        click.echo(f"Parsed {len(sources)} Claude conversations.")
-    elif source_type == "chatgpt":
-        sources = parse_chatgpt_export(p)
-        click.echo(f"Parsed {len(sources)} ChatGPT conversations.")
-    elif source_type == "claude_code":
-        sources = parse_claude_code_directory(p)
-        click.echo(f"Parsed {len(sources)} Claude Code files.")
-    elif source_type == "raw":
-        if p.is_file():
-            sources = [parse_raw_file(p)]
-            click.echo(f"Parsed raw file: {p.name}")
-        else:
-            for f in sorted(p.glob("**/*.md")) + sorted(p.glob("**/*.txt")):
-                sources.append(parse_raw_file(f))
-            click.echo(f"Parsed {len(sources)} raw files.")
+
+    if source_type == "article":
+        result = parse_article_url(path)
+        if result is None:
+            sys.exit(1)
+        sources = [result]
+        click.echo(f"Fetched article: {result.title}")
+
+    elif source_type == "youtube":
+        result = parse_youtube_url(path)
+        if result is None:
+            sys.exit(1)
+        sources = [result]
+        click.echo(f"Fetched YouTube transcript: {result.title}")
+
+    else:
+        p = Path(path)
+        if not p.exists():
+            click.echo(f"Error: path does not exist: {path}", err=True)
+            sys.exit(1)
+
+        if source_type == "claude":
+            sources = parse_claude_export(p)
+            click.echo(f"Parsed {len(sources)} Claude conversations.")
+        elif source_type == "chatgpt":
+            sources = parse_chatgpt_export(p)
+            click.echo(f"Parsed {len(sources)} ChatGPT conversations.")
+        elif source_type == "claude_code":
+            sources = parse_claude_code_directory(p)
+            click.echo(f"Parsed {len(sources)} Claude Code files.")
+        elif source_type == "raw":
+            if p.is_file():
+                sources = [parse_raw_file(p)]
+                click.echo(f"Parsed raw file: {p.name}")
+            else:
+                for f in sorted(p.glob("**/*.md")) + sorted(p.glob("**/*.txt")):
+                    sources.append(parse_raw_file(f))
+                click.echo(f"Parsed {len(sources)} raw files.")
 
     if not sources:
         click.echo("No sources found.")
@@ -115,10 +119,9 @@ def ingest(ctx, path, source_type):
 @cli.command("filter")
 @click.pass_context
 def filter_cmd(ctx):
-    """Run Haiku filter on all unfiltered sources."""
-    from kompile.ingest.raw import parse_raw_file
+    """Run Haiku filter on all unfiltered sources, then classify topics into tiers."""
     from kompile.compiler.filter import filter_source
-    import anthropic
+    from kompile.compiler.classify import classify_topics
 
     cfg = ctx.obj["config"]
     root = ctx.obj["root"]
@@ -130,37 +133,47 @@ def filter_cmd(ctx):
     unfiltered = state_unfiltered_source_ids(state)
     if not unfiltered:
         click.echo("All sources already filtered.")
-        return
+    else:
+        click.echo(f"Filtering {len(unfiltered)} sources with {model}...")
 
-    click.echo(f"Filtering {len(unfiltered)} sources with {model}...")
-
-    results = []
-    for i, sid in enumerate(sorted(unfiltered), 1):
-        src_file = raw_dir / f"{sid}.txt"
-        if not src_file.exists():
-            click.echo(f"  [{i}/{len(unfiltered)}] Skipping {sid} (file not found)")
-            continue
-
-        src_data = state["sources"].get(sid, {})
+        results = []
         from kompile.models import Source
-        source = Source(
-            id=sid,
-            platform=src_data.get("platform", "manual"),
-            title=src_data.get("title", sid),
-            date=src_data.get("date", ""),
-            content=src_file.read_text(encoding="utf-8"),
-            metadata=src_data.get("metadata", {}),
-        )
+        for i, sid in enumerate(sorted(unfiltered), 1):
+            src_file = raw_dir / f"{sid}.txt"
+            if not src_file.exists():
+                click.echo(f"  [{i}/{len(unfiltered)}] Skipping {sid} (file not found)")
+                continue
 
-        result = filter_source(source, client, model)
-        results.append(result)
-        status = "✓ keep" if result.keep else "✗ discard"
-        click.echo(f"  [{i}/{len(unfiltered)}] {source.title[:60]} → {status} | {result.summary[:80]}")
+            src_data = state["sources"].get(sid, {})
+            source = Source(
+                id=sid,
+                platform=src_data.get("platform", "manual"),
+                title=src_data.get("title", sid),
+                date=src_data.get("date", ""),
+                content=src_file.read_text(encoding="utf-8"),
+                url=src_data.get("metadata", {}).get("url"),
+                metadata=src_data.get("metadata", {}),
+            )
 
-    state_add_filter_results(state, results)
+            result = filter_source(source, client, model)
+            results.append(result)
+            status = "✓ keep" if result.keep else "✗ discard"
+            click.echo(f"  [{i}/{len(unfiltered)}] {source.title[:60]} → {status} | {result.summary[:80]}")
+
+        state_add_filter_results(state, results)
+        kept = sum(1 for r in results if r.keep)
+        click.echo(f"\nFiltered {len(results)} sources: {kept} kept, {len(results)-kept} discarded.")
+
+    # Always re-classify (filter results may have changed)
+    click.echo("\nClassifying topics into depth tiers...")
+    classifications = classify_topics(state["filter_results"])
+    state_add_tier_classifications(state, classifications)
     save_state(root, state)
-    kept = sum(1 for r in results if r.keep)
-    click.echo(f"\nFiltered {len(results)} sources: {kept} kept, {len(results)-kept} discarded.")
+
+    deep = sum(1 for v in classifications.values() if v["tier"] == "deep")
+    active = sum(1 for v in classifications.values() if v["tier"] == "active")
+    surface = sum(1 for v in classifications.values() if v["tier"] == "surface")
+    click.echo(f"Topics: {deep} deep domains, {active} active topics, {surface} surface notes")
     click.echo("Run `kompile compile` to generate your knowledge base.")
 
 
@@ -168,12 +181,17 @@ def filter_cmd(ctx):
 @click.option("--incremental", is_flag=True, help="Only process new sources since last compile")
 @click.pass_context
 def compile(ctx, incremental):
-    """Run full compilation pipeline → wiki/ directory."""
-    from kompile.models import Source
+    """Run full tiered compilation pipeline → wiki/ directory."""
+    from kompile.models import Source, TieredWiki, SurfaceNote, Concept, Insight, Gap
     from kompile.compiler.filter import filter_source
+    from kompile.compiler.classify import classify_topics
     from kompile.compiler.summarize import summarize_source
-    from kompile.compiler.compile import compile_wiki, compile_incremental
-    from kompile.compiler.writer import write_wiki
+    from kompile.compiler.compile import (
+        compile_wiki_domain, compile_active_topic, compile_cross_domain,
+        compile_incremental,
+    )
+    from kompile.compiler.writer import write_wiki, _write_articles, _write_deep_article
+    from kompile.utils import slugify
 
     cfg = ctx.obj["config"]
     root = ctx.obj["root"]
@@ -182,7 +200,9 @@ def compile(ctx, incremental):
     state = load_state(root)
     client = _get_client(cfg)
 
-    # Step 1: Filter any unfiltered sources first
+    # ------------------------------------------------------------------ #
+    # Step 1: Filter any unfiltered sources
+    # ------------------------------------------------------------------ #
     unfiltered = state_unfiltered_source_ids(state)
     if unfiltered:
         click.echo(f"Filtering {len(unfiltered)} new sources first...")
@@ -195,7 +215,9 @@ def compile(ctx, incremental):
             source = Source(
                 id=sid, platform=src_data.get("platform", "manual"),
                 title=src_data.get("title", sid), date=src_data.get("date", ""),
-                content=src_file.read_text(encoding="utf-8"), metadata=src_data.get("metadata", {}),
+                content=src_file.read_text(encoding="utf-8"),
+                url=src_data.get("metadata", {}).get("url"),
+                metadata=src_data.get("metadata", {}),
             )
             result = filter_source(source, client, cfg["models"]["filter"])
             results.append(result)
@@ -204,10 +226,33 @@ def compile(ctx, incremental):
         state_add_filter_results(state, results)
         save_state(root, state)
 
-    # Step 2: Summarize any unsummarized kept sources
-    unsummarized = state_unsummarized_kept_ids(state)
+    # ------------------------------------------------------------------ #
+    # Step 2: Classify topics (if not already done or new sources added)
+    # ------------------------------------------------------------------ #
+    tier_classifications = state_get_tier_classifications(state)
+    if not tier_classifications or unfiltered:
+        tier_classifications = classify_topics(state["filter_results"])
+        state_add_tier_classifications(state, tier_classifications)
+        save_state(root, state)
+
+    # ------------------------------------------------------------------ #
+    # Step 3: Summarize deep + active sources (skip surface)
+    # ------------------------------------------------------------------ #
+    # Determine which source IDs need summaries (deep + active tiers only)
+    deep_active_sids: set[str] = set()
+    for topic, info in tier_classifications.items():
+        if info["tier"] in ("deep", "active"):
+            deep_active_sids.update(info["sources"])
+
+    unsummarized = {
+        sid for sid in deep_active_sids
+        if sid in state["filter_results"]
+        and state["filter_results"][sid].get("keep")
+        and sid not in state["summaries"]
+    }
+
     if unsummarized:
-        click.echo(f"\nSummarizing {len(unsummarized)} sources...")
+        click.echo(f"\nSummarizing {len(unsummarized)} sources (deep + active only)...")
         new_summaries = []
         for i, sid in enumerate(sorted(unsummarized), 1):
             src_file = raw_dir / f"{sid}.txt"
@@ -217,7 +262,9 @@ def compile(ctx, incremental):
             source = Source(
                 id=sid, platform=src_data.get("platform", "manual"),
                 title=src_data.get("title", sid), date=src_data.get("date", ""),
-                content=src_file.read_text(encoding="utf-8"), metadata=src_data.get("metadata", {}),
+                content=src_file.read_text(encoding="utf-8"),
+                url=src_data.get("metadata", {}).get("url"),
+                metadata=src_data.get("metadata", {}),
             )
             click.echo(f"  [{i}/{len(unsummarized)}] Summarizing: {source.title[:60]}...")
             summary = summarize_source(source, client, cfg["models"]["summarize"])
@@ -225,47 +272,200 @@ def compile(ctx, incremental):
         state_add_summaries(state, new_summaries)
         save_state(root, state)
 
-    summaries = state_get_summaries(state)
-    if not summaries:
-        click.echo("No kept sources to compile. Import some sources first.")
-        return
+    # Build summary lookup
+    all_summaries = {s.source_id: s for s in state_get_summaries(state)}
 
-    # Step 3: Compile
+    # ------------------------------------------------------------------ #
+    # Incremental path
+    # ------------------------------------------------------------------ #
     if incremental and (wiki_dir / "index.md").exists():
-        # Only compile the newly summarized sources incrementally
-        new_sids = set(s.source_id for s in new_summaries) if unsummarized else set()
+        new_sids = unsummarized if 'new_summaries' in dir() else set()
         if not new_sids:
             click.echo("No new sources to incrementally compile.")
             return
         click.echo(f"\nIncrementally compiling {len(new_sids)} new source(s)...")
-        for summary in [s for s in summaries if s.source_id in new_sids]:
-            click.echo(f"  Integrating: {summary.title[:60]}...")
-            patch = compile_incremental(summary, wiki_dir, client, cfg["models"]["compile"])
-            _apply_incremental_patch(patch, wiki_dir)
+        for sid in new_sids:
+            if sid in all_summaries:
+                click.echo(f"  Integrating: {all_summaries[sid].title[:60]}...")
+                patch = compile_incremental(all_summaries[sid], wiki_dir, client, cfg["models"]["compile"])
+                _apply_incremental_patch(patch, wiki_dir)
         click.echo("Incremental compilation complete.")
-    else:
-        click.echo(f"\nCompiling {len(summaries)} source summaries into wiki...")
-        wiki = compile_wiki(
-            summaries, client, cfg["models"]["compile"],
-            progress_cb=lambda msg: click.echo(f"  {msg}"),
+        return
+
+    # ------------------------------------------------------------------ #
+    # Step 4: Full tiered compilation
+    # ------------------------------------------------------------------ #
+    known_article_ids: set[str] = set()
+    deep_domain_wikis = []
+    active_notes = []
+    surface_notes = []
+
+    # -- Deep domains --
+    deep_topics = {t: info for t, info in tier_classifications.items() if info["tier"] == "deep"}
+    if deep_topics:
+        click.echo(f"\nCompiling {len(deep_topics)} deep domain(s)...")
+    for topic, info in deep_topics.items():
+        topic_summaries = [all_summaries[sid] for sid in info["sources"] if sid in all_summaries]
+        if not topic_summaries:
+            click.echo(f"  Skipping '{topic}' (no summaries available)")
+            continue
+        click.echo(f"  Compiling deep domain: {topic} ({len(topic_summaries)} summaries)...")
+        domain_wiki = compile_wiki_domain(
+            topic_summaries, topic, client, cfg["models"]["compile"],
+            known_ids=known_article_ids,
+            progress_cb=lambda msg: click.echo(f"    {msg}"),
         )
-        write_wiki(wiki, wiki_dir)
-        click.echo(f"\nDone! Knowledge base written to {wiki_dir}/")
-        click.echo(f"  {len(wiki.articles)} articles")
-        click.echo(f"  {len(wiki.insights)} insights")
-        click.echo(f"  {len(wiki.suggested_gaps)} suggested gaps")
-        click.echo("\nTo use with Claude Desktop, start the MCP server:")
-        click.echo("  python -m kompile.mcp.server")
+        deep_domain_wikis.append(domain_wiki)
+
+    # -- Active topics --
+    active_topics = {t: info for t, info in tier_classifications.items() if info["tier"] == "active"}
+    if active_topics:
+        click.echo(f"\nCompiling {len(active_topics)} active topic(s)...")
+    for topic, info in active_topics.items():
+        topic_summaries = [all_summaries[sid] for sid in info["sources"] if sid in all_summaries]
+        if not topic_summaries:
+            click.echo(f"  Skipping '{topic}' (no summaries available)")
+            continue
+        click.echo(f"  Compiling active topic: {topic} ({len(topic_summaries)} summaries)...")
+        note = compile_active_topic(topic_summaries, topic, client, cfg["models"]["compile"])
+        active_notes.append(note)
+
+    # -- Surface notes (no compilation — use Haiku filter summary) --
+    surface_topics = {t: info for t, info in tier_classifications.items() if info["tier"] == "surface"}
+    for topic, info in surface_topics.items():
+        for sid in info["sources"]:
+            fr = state["filter_results"].get(sid, {})
+            if not fr.get("keep"):
+                continue
+            src_data = state["sources"].get(sid, {})
+            surface_notes.append(SurfaceNote(
+                source_id=sid,
+                title=src_data.get("title", sid),
+                platform=src_data.get("platform", "manual"),
+                date=src_data.get("date", ""),
+                summary=fr.get("summary", ""),
+                topics=fr.get("topics", []),
+            ))
+    if surface_topics:
+        click.echo(f"\n{len(surface_notes)} surface note(s) archived (no compilation needed).")
+
+    if not deep_domain_wikis and not active_notes and not surface_notes:
+        click.echo("No kept sources to compile. Import and filter some sources first.")
+        return
+
+    # ------------------------------------------------------------------ #
+    # Step 5: Cross-domain pass
+    # ------------------------------------------------------------------ #
+    click.echo("\nRunning cross-domain analysis...")
+    lightweight_index = _build_lightweight_index(deep_domain_wikis, active_notes, surface_notes)
+    cross_data = compile_cross_domain(lightweight_index, client, cfg["models"]["compile"])
+
+    # Parse cross-domain results
+    cross_concepts = [
+        Concept(
+            name=c.get("concept", c.get("name", "")),
+            appears_in=c.get("appears_in", []),
+            note=c.get("note", ""),
+        )
+        for c in cross_data.get("cross_topic_concepts", [])
+    ]
+    cross_insights = [
+        Insight(text=ins["text"], sources=ins.get("sources", []))
+        for ins in cross_data.get("insights", [])
+    ]
+    cross_gaps = [
+        Gap(gap=g["gap"], detail=g.get("detail", ""))
+        for g in cross_data.get("suggested_gaps", [])
+    ]
+
+    # Apply related_domains patches to active notes
+    related_map = cross_data.get("active_topic_related_domains", {})
+    for note in active_notes:
+        topic_slug = slugify(note.topic)
+        note.related_domains = related_map.get(topic_slug, related_map.get(note.topic, []))
+
+    # ------------------------------------------------------------------ #
+    # Step 6: Write wiki
+    # ------------------------------------------------------------------ #
+    from kompile.models import TieredWiki
+    tiered_wiki = TieredWiki(
+        deep_domains=deep_domain_wikis,
+        active_notes=active_notes,
+        surface_notes=surface_notes,
+        cross_topic_concepts=cross_concepts,
+        insights=cross_insights,
+        suggested_gaps=cross_gaps,
+    )
+
+    click.echo(f"\nWriting wiki to {wiki_dir}/...")
+    write_wiki(tiered_wiki, wiki_dir)
+
+    # Summary
+    total_articles = sum(len(d.articles) for d in deep_domain_wikis)
+    click.echo(f"\nDone!")
+    click.echo(f"  Deep domains:   {len(deep_domain_wikis)} ({total_articles} articles)")
+    click.echo(f"  Active topics:  {len(active_notes)} (1 note each)")
+    click.echo(f"  Surface notes:  {len(surface_notes)} (archived)")
+    click.echo(f"  Insights:       {len(cross_insights)}")
+    click.echo(f"  Suggested gaps: {len(cross_gaps)}")
+    click.echo(f"\nTo use with Claude Desktop, start the MCP server:")
+    click.echo("  python -m kompile.mcp.server")
+
+
+def _build_lightweight_index(
+    deep_domain_wikis, active_notes, surface_notes
+) -> str:
+    """Build a lightweight index string (<10K tokens) for the cross-domain pass.
+
+    Contains only titles, one-line summaries, concept tags, and source platforms.
+    Does NOT include full article content.
+    """
+    lines = ["# Knowledge Profile — Lightweight Index\n\n"]
+
+    if deep_domain_wikis:
+        lines.append("## Deep Domains\n\n")
+    for dw in deep_domain_wikis:
+        lines.append(f"### {dw.domain_name}\n\n")
+        for art in dw.articles:
+            concepts = ", ".join(art.concepts[:5])
+            platforms = ", ".join(set(s.platform for s in art.sources))
+            first_line = art.content.split("\n")[0][:120].strip()
+            lines.append(f"- **{art.title}** | concepts: {concepts} | platforms: {platforms} — {first_line}\n")
+        lines.append("\n")
+
+    if active_notes:
+        lines.append("## Active Topics\n\n")
+    for note in active_notes:
+        concepts = ", ".join(note.concepts[:5])
+        platforms = ", ".join(set(s.platform for s in note.sources))
+        first_line = note.note.split("\n")[0][:120].strip()
+        lines.append(f"- **{note.topic}** | concepts: {concepts} | platforms: {platforms} — {first_line}\n")
+
+    if surface_notes:
+        lines.append("\n## Surface Notes\n\n")
+        for sn in surface_notes:
+            lines.append(f"- {sn.title} ({sn.platform}) — {sn.summary}\n")
+
+    return "".join(lines)
 
 
 def _apply_incremental_patch(patch: dict, wiki_dir: Path) -> None:
-    """Apply incremental compilation patch to wiki files."""
+    """Apply incremental compilation patch to wiki files (legacy flat structure)."""
+    # Try tiered deep/ first, fall back to flat articles/
+    deep_dir = wiki_dir / "deep"
     articles_dir = wiki_dir / "articles"
-    articles_dir.mkdir(exist_ok=True)
+
+    # Find writable articles directory
+    if deep_dir.exists():
+        target_dir = deep_dir / "incremental"
+        target_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        target_dir = articles_dir
+        target_dir.mkdir(exist_ok=True)
 
     for art in patch.get("new_articles", []):
-        from kompile.models import Article, ArticleSource
-        from kompile.compiler.writer import _write_articles, WikiCompilation, Domain, Concept, Insight, Gap
+        from kompile.models import Article, ArticleSource, WikiCompilation
+        from kompile.compiler.writer import _write_articles
         article = Article(
             id=art["id"], title=art["title"],
             sources=[ArticleSource(**s) for s in art.get("sources", [])],
@@ -273,25 +473,27 @@ def _apply_incremental_patch(patch: dict, wiki_dir: Path) -> None:
             backlinks=art.get("backlinks", []),
         )
         _write_articles(
-            WikiCompilation(title="", domains=[], articles=[article],
+            WikiCompilation(title="", articles=[article], domains=[],
                             cross_topic_concepts=[], insights=[], suggested_gaps=[]),
-            articles_dir,
+            target_dir,
         )
 
     for updated in patch.get("updated_articles", []):
-        art_file = articles_dir / f"{updated['id']}.md"
-        if art_file.exists():
+        # Search for the article across the wiki
+        art_file = None
+        for candidate in wiki_dir.glob(f"**/{updated['id']}.md"):
+            art_file = candidate
+            break
+        if art_file and art_file.exists():
             content = art_file.read_text(encoding="utf-8")
-            # Replace content after frontmatter
             parts = content.split("---\n", 2)
             if len(parts) >= 3:
                 new_content = parts[0] + "---\n" + parts[1] + "---\n\n" + updated.get("content", "") + "\n"
                 art_file.write_text(new_content, encoding="utf-8")
 
-    # Append new insights
     if patch.get("new_insights"):
         insights_file = wiki_dir / "insights.md"
-        existing = insights_file.read_text(encoding="utf-8") if insights_file.exists() else "# Cross-Source Insights\n\n"
+        existing = insights_file.read_text(encoding="utf-8") if insights_file.exists() else "# Cross-Domain Insights\n\n"
         for ins in patch["new_insights"]:
             existing += f"- {ins}\n\n"
         insights_file.write_text(existing, encoding="utf-8")
@@ -310,9 +512,16 @@ def status(ctx):
     filtered = len(state["filter_results"])
     kept = sum(1 for r in state["filter_results"].values() if r.get("keep"))
     summarized = len(state["summaries"])
-    compiled = (wiki_dir / "index.md").exists()
 
-    articles = list((wiki_dir / "articles").glob("*.md")) if compiled else []
+    tier_classifications = state_get_tier_classifications(state)
+    deep = sum(1 for v in tier_classifications.values() if v["tier"] == "deep")
+    active = sum(1 for v in tier_classifications.values() if v["tier"] == "active")
+    surface_count = sum(1 for v in tier_classifications.values() if v["tier"] == "surface")
+
+    compiled = (wiki_dir / "index.md").exists()
+    deep_articles = list((wiki_dir / "deep").glob("**/*.md")) if (wiki_dir / "deep").exists() else []
+    active_notes = list((wiki_dir / "active").glob("*.md")) if (wiki_dir / "active").exists() else []
+    surface_notes = list((wiki_dir / "surface").glob("*.md")) if (wiki_dir / "surface").exists() else []
 
     click.echo("KOMPILE Status")
     click.echo("─" * 40)
@@ -320,10 +529,17 @@ def status(ctx):
     click.echo(f"Sources filtered:    {filtered}/{total_sources}")
     click.echo(f"  → kept:            {kept}")
     click.echo(f"  → discarded:       {filtered - kept}")
+    if tier_classifications:
+        click.echo(f"Topics classified:   {len(tier_classifications)}")
+        click.echo(f"  → deep domains:    {deep}")
+        click.echo(f"  → active topics:   {active}")
+        click.echo(f"  → surface notes:   {surface_count}")
     click.echo(f"Sources summarized:  {summarized}/{kept}")
     click.echo(f"Wiki compiled:       {'yes' if compiled else 'no'}")
     if compiled:
-        click.echo(f"  → articles:        {len(articles)}")
+        click.echo(f"  → deep articles:   {len(deep_articles)}")
+        click.echo(f"  → active notes:    {len(active_notes)}")
+        click.echo(f"  → surface notes:   {len(surface_notes)}")
     click.echo(f"\nWiki directory:      {wiki_dir}/")
 
 

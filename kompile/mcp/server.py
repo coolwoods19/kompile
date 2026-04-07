@@ -1,11 +1,22 @@
 """KOMPILE MCP Server — exposes the knowledge base to Claude via 5 tools.
 
 Tools:
-  get_index         — all article titles + one-line summaries + concept tags
-  get_article       — full content of one article
-  get_insights      — cross-source insights + suggested gaps
-  search            — keyword search across articles
-  get_knowledge_map — domain tree (domains → subtopics → articles)
+  get_index             — all article/note titles + summaries + concept tags + tier indicators
+  get_article           — full content of one article or active note
+  get_insights          — cross-domain insights + suggested gaps
+  search                — keyword search across all articles, notes, and surface entries
+  get_knowledge_profile — knowledge shape: domains/topics with depth indicators and tier classification
+
+IMPORTANT — Article ID uniqueness:
+  Article IDs are globally unique across wiki/deep/**/*.md and wiki/active/*.md.
+  get_article uses first-match glob across both paths. This relies on the compile step
+  enforcing uniqueness (see compile.py). If an ID is not found, a fuzzy match is attempted.
+
+KOMPILE is CONTEXT, not constraint:
+  These tools provide Claude with the user's personal research context.
+  Claude should use this to build on the user's existing knowledge and frameworks,
+  combining it with its own knowledge and web search — not be restricted to only
+  answering from the knowledge base.
 
 Run:
   python -m kompile.mcp.server
@@ -14,7 +25,6 @@ Run:
 from __future__ import annotations
 
 import re
-import sys
 from pathlib import Path
 
 import mcp.server.stdio
@@ -48,8 +58,42 @@ def _get_index() -> str:
     global _index_cache
     if _index_cache is None:
         p = _get_wiki_dir() / "index.md"
-        _index_cache = p.read_text(encoding="utf-8") if p.exists() else "_Knowledge base not yet compiled. Run `kompile compile`._"
+        _index_cache = (
+            p.read_text(encoding="utf-8")
+            if p.exists()
+            else "_Knowledge base not yet compiled. Run `kompile compile`._"
+        )
     return _index_cache
+
+
+def _find_article(article_id: str, wiki_dir: Path) -> Path | None:
+    """Search wiki/deep/**/*.md and wiki/active/*.md for a matching article ID.
+
+    Article IDs are globally unique across the wiki — first match wins.
+    """
+    # Exact match in deep/
+    for candidate in (wiki_dir / "deep").glob(f"**/{article_id}.md"):
+        return candidate
+
+    # Exact match in active/
+    active_candidate = wiki_dir / "active" / f"{article_id}.md"
+    if active_candidate.exists():
+        return active_candidate
+
+    return None
+
+
+def _fuzzy_find_articles(article_id: str, wiki_dir: Path) -> list[str]:
+    """Return article IDs (stems) that contain the query as a substring."""
+    matches = []
+    query = article_id.lower()
+    for candidate in (wiki_dir / "deep").glob("**/*.md"):
+        if query in candidate.stem.lower():
+            matches.append(candidate.stem)
+    for candidate in (wiki_dir / "active").glob("*.md"):
+        if query in candidate.stem.lower():
+            matches.append(candidate.stem)
+    return matches
 
 
 @server.list_tools()
@@ -58,9 +102,12 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(
             name="get_index",
             description=(
-                "Returns the full index of the KOMPILE personal knowledge base: "
-                "all article titles, one-line summaries, and concept tags. "
-                "Call this first to decide which articles are relevant to the user's question. "
+                "Returns the index of the user's personal knowledge base: "
+                "article and note titles, one-line summaries, concept tags, and tier indicators "
+                "(⚡ Deep Domain | 🎯 Active Topic | ▪ Surface Note). "
+                "Call this first to understand the user's knowledge landscape and decide which "
+                "articles are relevant to the question. "
+                "This is CONTEXT for richer, more personalised answers — not the only source of truth. "
                 "Typical token cost: 300-500 tokens."
             ),
             inputSchema={"type": "object", "properties": {}, "required": []},
@@ -68,9 +115,12 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(
             name="get_article",
             description=(
-                "Returns the full content of one article from the knowledge base, "
-                "including source citations, [Source]/[Synthesis] origin markers, "
-                "and any ⚠ Conflict flags where sources disagreed. "
+                "Returns the full content of one article or active note from the knowledge base, "
+                "including source citations ([Source: platform — 'title' (date)]), "
+                "[Source]/[Synthesis] origin markers, "
+                "and ⚠ Conflict flags where sources disagreed. "
+                "Use this to understand the user's existing analysis on a topic before "
+                "adding new information or perspectives. "
                 "Typical token cost: 500-800 tokens."
             ),
             inputSchema={
@@ -78,7 +128,7 @@ async def list_tools() -> list[types.Tool]:
                 "properties": {
                     "article_id": {
                         "type": "string",
-                        "description": "The article slug ID from the index (e.g. 'cuda-moat', 'inference-cost-trends')",
+                        "description": "The article slug ID from the index (e.g. 'cuda-moat', 'product-strategy')",
                     }
                 },
                 "required": ["article_id"],
@@ -87,16 +137,17 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(
             name="get_insights",
             description=(
-                "Returns cross-source insights (connections discovered across multiple sources) "
-                "and suggested knowledge gaps. Useful when the user asks about relationships between topics "
-                "or what they might be missing. Typical token cost: 200-300 tokens."
+                "Returns cross-domain insights (connections discovered across multiple sources and topics) "
+                "and suggested knowledge gaps. Especially useful for questions about relationships between "
+                "topics, or to understand what the user may be missing. "
+                "Typical token cost: 200-300 tokens."
             ),
             inputSchema={"type": "object", "properties": {}, "required": []},
         ),
         types.Tool(
             name="search",
             description=(
-                "Keyword search across all articles in the knowledge base. "
+                "Keyword search across all articles, active notes, and surface entries in the knowledge base. "
                 "Returns matching paragraphs with their article titles. "
                 "Use when you need to find specific claims or terms rather than loading whole articles. "
                 "Typical token cost: 200-500 tokens."
@@ -106,17 +157,20 @@ async def list_tools() -> list[types.Tool]:
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "Search terms to look for across articles",
+                        "description": "Search terms to look for across the knowledge base",
                     }
                 },
                 "required": ["query"],
             },
         ),
         types.Tool(
-            name="get_knowledge_map",
+            name="get_knowledge_profile",
             description=(
-                "Returns the hierarchical knowledge map: domains → subtopics → article list. "
-                "Useful for understanding the overall shape of the knowledge base. "
+                "Returns the user's overall knowledge shape — which domains are Deep (5+ sources, "
+                "full articles), which are Active (2-4 sources, synthesised note), and which are "
+                "Surface (1 source, archived). "
+                "Use to calibrate response depth: go deeper on topics the user knows well, provide "
+                "more foundations on topics they've barely explored. "
                 "Typical token cost: 200-400 tokens."
             ),
             inputSchema={"type": "object", "properties": {}, "required": []},
@@ -136,17 +190,15 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
         article_id = arguments.get("article_id", "").strip()
         if not article_id:
             return [types.TextContent(type="text", text="Error: article_id is required.")]
-        art_file = wiki_dir / "articles" / f"{article_id}.md"
-        if not art_file.exists():
-            # Try fuzzy match
-            articles_dir = wiki_dir / "articles"
-            if articles_dir.exists():
-                matches = [f.stem for f in articles_dir.glob("*.md") if article_id.lower() in f.stem.lower()]
-                if matches:
-                    return [types.TextContent(
-                        type="text",
-                        text=f"Article '{article_id}' not found. Did you mean one of: {', '.join(matches)}?"
-                    )]
+
+        art_file = _find_article(article_id, wiki_dir)
+        if art_file is None:
+            matches = _fuzzy_find_articles(article_id, wiki_dir)
+            if matches:
+                return [types.TextContent(
+                    type="text",
+                    text=f"Article '{article_id}' not found. Did you mean one of: {', '.join(matches[:5])}?"
+                )]
             return [types.TextContent(type="text", text=f"Article '{article_id}' not found.")]
         return [types.TextContent(type="text", text=art_file.read_text(encoding="utf-8"))]
 
@@ -167,13 +219,18 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
         if not query:
             return [types.TextContent(type="text", text="Error: query is required.")]
 
-        articles_dir = wiki_dir / "articles"
-        if not articles_dir.exists():
-            return [types.TextContent(type="text", text="_Knowledge base not compiled yet._")]
-
         results = []
         terms = query.split()
-        for art_file in sorted(articles_dir.glob("*.md")):
+
+        # Search all markdown files across deep/, active/, surface/
+        search_dirs = ["deep", "active", "surface"]
+        all_files: list[Path] = []
+        for d in search_dirs:
+            dpath = wiki_dir / d
+            if dpath.exists():
+                all_files.extend(sorted(dpath.glob("**/*.md")))
+
+        for art_file in all_files:
             content = art_file.read_text(encoding="utf-8")
             # Strip YAML frontmatter
             body = content
@@ -190,7 +247,6 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
                         matching_paras.append(clean[:400])
 
             if matching_paras:
-                # Extract title from first heading or filename
                 title_match = re.search(r"^#\s+(.+)$", body, re.MULTILINE)
                 title = title_match.group(1) if title_match else art_file.stem
                 results.append(f"### {title}\n\n" + "\n\n".join(matching_paras[:3]))
@@ -199,11 +255,11 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             return [types.TextContent(type="text", text=f"No matches found for '{query}'.")]
         return [types.TextContent(type="text", text="\n\n---\n\n".join(results[:10]))]
 
-    elif name == "get_knowledge_map":
-        domains_file = wiki_dir / "domains.md"
-        if not domains_file.exists():
-            return [types.TextContent(type="text", text="_Knowledge map not compiled yet._")]
-        return [types.TextContent(type="text", text=domains_file.read_text(encoding="utf-8"))]
+    elif name == "get_knowledge_profile":
+        profile_file = wiki_dir / "profile.md"
+        if not profile_file.exists():
+            return [types.TextContent(type="text", text="_Knowledge profile not compiled yet._")]
+        return [types.TextContent(type="text", text=profile_file.read_text(encoding="utf-8"))]
 
     return [types.TextContent(type="text", text=f"Unknown tool: {name}")]
 

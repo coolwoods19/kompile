@@ -1,18 +1,28 @@
 import { useState } from "react";
-import { kb } from "../data/knowledgeBase";
+import {
+  deepDomains, activeNotes, crossDomainInsights, suggestedGaps
+} from "../data/knowledgeBase";
 
 const EXAMPLE_QUESTIONS = [
   "What is NVIDIA's main competitive moat and how durable is it?",
   "How is inference cost changing and what's driving it?",
-  "Should I worry about Google TPUs displacing NVIDIA in inference?",
+  "What connections do you see between my AI Infrastructure research and my Personal Finance thinking?",
 ];
 
 function buildContext() {
-  // Build a compact context from the knowledge base for the API call
-  const articles = kb.articles.map((a) => `## ${a.title}\n${a.content}`).join("\n\n---\n\n");
-  const insights = kb.insights.map((i) => `- ${i.text}`).join("\n");
-  const gaps = kb.suggested_gaps.map((g) => `- ${g.gap}: ${g.detail}`).join("\n");
-  return `# Knowledge Base: ${kb.title}\n\n${articles}\n\n# Cross-Source Insights\n${insights}\n\n# Suggested Gaps\n${gaps}`;
+  // Deep domain articles
+  const articles = deepDomains.flatMap((d) =>
+    d.articles.map((a) => `## ${a.title}\n${a.content}`)
+  ).join("\n\n---\n\n");
+
+  // Active topic notes
+  const notes = activeNotes.map((n) => `## ${n.topic} (Active Topic)\n${n.note}`).join("\n\n---\n\n");
+
+  // Cross-domain insights and gaps
+  const insights = crossDomainInsights.map((i) => `- ${i.text}`).join("\n");
+  const gaps = suggestedGaps.map((g) => `- ${g.gap}: ${g.detail}`).join("\n");
+
+  return `# Knowledge Profile\n\n## Deep Domains\n\n${articles}\n\n## Active Topics\n\n${notes}\n\n# Cross-Domain Insights\n${insights}\n\n# Suggested Gaps\n${gaps}`;
 }
 
 export default function QA() {

@@ -13,16 +13,21 @@ _STATE_FILE = ".kompile_state.json"
 
 def _default_state() -> dict:
     return {
-        "sources": {},        # id → {id, platform, title, date, metadata, content_hash}
-        "filter_results": {}, # id → {source_id, keep, topics, summary}
-        "summaries": {},      # id → SourceSummary as dict
+        "sources": {},            # id → {id, platform, title, date, metadata, content_hash}
+        "filter_results": {},     # id → {source_id, keep, topics, summary}
+        "summaries": {},          # id → SourceSummary as dict
+        "tier_classifications": {},  # topic → {sources: [...], tier: "deep"|"active"|"surface"}
     }
 
 
 def load_state(root: Path) -> dict:
     p = root / _STATE_FILE
     if p.exists():
-        return json.loads(p.read_text(encoding="utf-8"))
+        state = json.loads(p.read_text(encoding="utf-8"))
+        # Backfill key for states written before tier_classifications was added
+        if "tier_classifications" not in state:
+            state["tier_classifications"] = {}
+        return state
     return _default_state()
 
 
@@ -68,6 +73,20 @@ def state_get_summaries(state: dict) -> list[SourceSummary]:
             key_terms=data.get("key_terms", []),
         ))
     return summaries
+
+
+def state_add_tier_classifications(state: dict, classifications: dict) -> None:
+    """Store topic tier classifications.
+
+    Args:
+        classifications: {topic_name: {"sources": [sid, ...], "tier": "deep"|"active"|"surface"}}
+    """
+    state["tier_classifications"] = classifications
+
+
+def state_get_tier_classifications(state: dict) -> dict:
+    """Return stored tier classifications."""
+    return state.get("tier_classifications", {})
 
 
 def state_unfiltered_source_ids(state: dict) -> set[str]:
