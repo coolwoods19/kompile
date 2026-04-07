@@ -162,7 +162,7 @@ models:
 
 ## Demo
 
-Live demo (pre-loaded AI infrastructure knowledge base): [kompile-demo.vercel.app](https://kompile-demo.vercel.app)
+Live demo (pre-loaded AI infrastructure knowledge base): [[kompile-demo.vercel.app](https://kompile-theta.vercel.app/)](https://kompile-theta.vercel.app/)
 
 ---
 
