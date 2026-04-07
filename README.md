@@ -1,6 +1,6 @@
 # KOMPILE
 
-**Personal knowledge compiler.** Turns months of AI conversations into a structured, cited, inspectable wiki — owned by you, accessible to any AI model.
+**A personal knowledge base that grows with you.** Ingest anything — AI conversations, YouTube videos, articles, your own notes — and compile it into a structured, cited wiki that lives on your machine and talks to any AI model.
 
 > Raw sources are source code. The LLM is the compiler. The wiki is the executable. — Karpathy
 
@@ -8,9 +8,11 @@
 
 ## What it does
 
-1. **Ingest** — parse Claude.ai exports, ChatGPT exports, Claude Code project files, or raw notes
-2. **Compile** — LLM pipeline extracts claims, synthesizes articles, flags contradictions, identifies gaps
-3. **Query via MCP** — Claude Desktop reads your knowledge base in real time via a local MCP server
+1. **Ingest** — pull in knowledge from anywhere: Claude/ChatGPT exports, YouTube transcripts, web articles, Claude Code projects, raw notes
+2. **Compile** — LLM pipeline filters noise, extracts claims, synthesizes articles by topic depth, flags contradictions, and identifies gaps across your entire knowledge base
+3. **Query via MCP** — Claude Desktop reads your wiki in real time via a local MCP server, so your accumulated knowledge becomes part of every conversation
+
+This is not a search engine over your files. It's a compiled knowledge base — sources are synthesized into articles you could have written yourself, with every claim traced back to its origin.
 
 Every compiled article has:
 - Source citations on every claim
@@ -47,11 +49,15 @@ export ANTHROPIC_API_KEY=sk-ant-...
 ### 1. Ingest sources
 
 ```bash
-kompile ingest claude_export.zip          # Claude.ai export (ZIP)
-kompile ingest chatgpt_export.zip         # ChatGPT export (ZIP)
-kompile ingest /path/to/project/          # Claude Code project directory
-kompile ingest my_notes.md               # Raw markdown / text file
+kompile ingest claude_export.zip              # Claude.ai export (ZIP)
+kompile ingest chatgpt_export.zip             # ChatGPT export (ZIP)
+kompile ingest /path/to/project/              # Claude Code project directory
+kompile ingest my_notes.md                    # Raw markdown / text file
+kompile ingest https://youtube.com/watch?v=… # YouTube transcript
+kompile ingest https://example.com/article   # Web article
 ```
+
+Type is auto-detected. Pass `--type` to override if needed.
 
 ### 2. Compile
 
@@ -172,4 +178,4 @@ Live demo (pre-loaded AI infrastructure knowledge base): [kompile-demo.vercel.ap
 
 ---
 
-*Inspired by Andrej Karpathy's "LLM Knowledge Bases" (April 2026). Your knowledge belongs to you.*
+*Inspired by Andrej Karpathy's "LLM Knowledge Bases" (April 2026). Your knowledge, your machine, your AI.*
