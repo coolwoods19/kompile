@@ -15,6 +15,9 @@ raw/
 # Wiki (personal knowledge base — not tracked)
 wiki/
 
+# Local config override (put your api_key here, never committed)
+kompile.local.yaml
+
 # Demo
 demo/node_modules/
 demo/dist/
