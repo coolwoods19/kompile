@@ -43,15 +43,52 @@ def classify_topics(
         for topic in topics:
             topic_to_sources[topic.strip()].append(source_id)
 
+    # Build source → first-listed topic mapping before normalization
+    # (LLM ordering: first topic = most relevant primary topic)
+    source_first_topic: dict[str, str] = {}
+    for source_id, result in filter_results.items():
+        if result.get("keep"):
+            topics = result.get("topics", [])
+            if topics:
+                source_first_topic[source_id] = topics[0].strip()
+
     # Normalize topics via LLM if client provided and there are many granular topics
     if client and len(topic_to_sources) > 10:
         topic_to_sources = _normalize_topics(topic_to_sources, client, model)
 
-    classifications: dict[str, dict] = {}
+    # Build a mapping from original topic name → canonical topic name (post-normalization)
+    # topic_to_sources keys are already canonical after _normalize_topics; we need the
+    # reverse mapping to resolve source_first_topic → canonical topic.
+    # Re-derive by checking which canonical bucket each source ended up in.
+    source_to_canonical: dict[str, str] = {}
+    for canonical_topic, source_ids in topic_to_sources.items():
+        for sid in source_ids:
+            if sid not in source_to_canonical:
+                source_to_canonical[sid] = canonical_topic
+
+    # Determine each source's primary canonical topic using its first filter topic.
+    # If the first topic normalized to a known canonical, use that; otherwise fall back
+    # to whichever canonical bucket the source landed in.
+    source_primary_canonical: dict[str, str] = {}
+    for sid, first_topic in source_first_topic.items():
+        # Find which canonical topic the first_topic was merged into
+        primary = source_to_canonical.get(sid, first_topic)
+        source_primary_canonical[sid] = primary
+
+    # Remove sources from non-primary canonical buckets so each source appears exactly once.
+    # TODO: long-term, separate "descriptor tags" / "canonical topic" / "retrieval aliases"
+    # into three distinct layers rather than collapsing everything into one topic bucket.
+    deduplicated: dict[str, list[str]] = {}
     for topic, source_ids in topic_to_sources.items():
-        # Deduplicate source IDs (a source may map to the same canonical topic multiple times)
         unique_ids = list(dict.fromkeys(source_ids))
-        count = len(unique_ids)
+        primary_ids = [sid for sid in unique_ids if source_primary_canonical.get(sid) == topic]
+        deduplicated[topic] = primary_ids
+
+    classifications: dict[str, dict] = {}
+    for topic, source_ids in deduplicated.items():
+        if not source_ids:
+            continue
+        count = len(source_ids)
         if count >= DEEP_THRESHOLD:
             tier = "deep"
         elif count >= ACTIVE_THRESHOLD:
@@ -59,7 +96,7 @@ def classify_topics(
         else:
             tier = "surface"
         classifications[topic] = {
-            "sources": unique_ids,
+            "sources": source_ids,
             "tier": tier,
         }
 

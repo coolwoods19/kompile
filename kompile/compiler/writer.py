@@ -166,10 +166,12 @@ def _write_index(wiki: TieredWiki, wiki_dir: Path) -> None:
         for article in domain_wiki.articles:
             concepts_str = ", ".join(article.concepts[:4]) if article.concepts else ""
             concepts_part = f" | {concepts_str}" if concepts_str else ""
+            source_titles = ", ".join(f'"{s.title}"' for s in article.sources[:3])
+            sources_part = f" | sources: {source_titles}" if source_titles else ""
             first_line = article.content.split("\n")[0][:100].strip()
             lines.append(
                 f"- **[{article.title}](deep/{domain_slug}/{article.id}.md)**"
-                f"{concepts_part} — {first_line}\n"
+                f"{concepts_part}{sources_part} — {first_line}\n"
             )
 
     # Active topics
@@ -179,11 +181,13 @@ def _write_index(wiki: TieredWiki, wiki_dir: Path) -> None:
         topic_slug = slugify(note.topic)
         concepts_str = ", ".join(note.concepts[:4]) if note.concepts else ""
         concepts_part = f" | {concepts_str}" if concepts_str else ""
+        source_titles = ", ".join(f'"{s.title}"' for s in note.sources[:3])
+        sources_part = f" | sources: {source_titles}" if source_titles else ""
         first_line = note.note.split("\n")[0][:100].strip()
         related = f" | related: {', '.join(note.related_domains)}" if note.related_domains else ""
         lines.append(
             f"- **🎯 [{note.topic}](active/{topic_slug}.md)**"
-            f"{concepts_part}{related} — {first_line}\n"
+            f"{concepts_part}{sources_part}{related} — {first_line}\n"
         )
 
     # Surface notes

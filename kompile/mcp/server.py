@@ -42,9 +42,10 @@ def _load_wiki_dir() -> Path:
 
 server = Server("kompile")
 
-# Cache index in memory — don't re-read every query
+# Cache index in memory — invalidated automatically when index.md changes on disk
 _wiki_dir: Path | None = None
 _index_cache: str | None = None
+_index_mtime: float = 0.0
 
 
 def _get_wiki_dir() -> Path:
@@ -55,14 +56,14 @@ def _get_wiki_dir() -> Path:
 
 
 def _get_index() -> str:
-    global _index_cache
-    if _index_cache is None:
-        p = _get_wiki_dir() / "index.md"
-        _index_cache = (
-            p.read_text(encoding="utf-8")
-            if p.exists()
-            else "_Knowledge base not yet compiled. Run `kompile compile`._"
-        )
+    global _index_cache, _index_mtime
+    p = _get_wiki_dir() / "index.md"
+    if not p.exists():
+        return "_Knowledge base not yet compiled. Run `kompile compile`._"
+    current_mtime = p.stat().st_mtime
+    if _index_cache is None or current_mtime != _index_mtime:
+        _index_cache = p.read_text(encoding="utf-8")
+        _index_mtime = current_mtime
     return _index_cache
 
 
@@ -103,10 +104,10 @@ async def list_tools() -> list[types.Tool]:
             name="get_index",
             description=(
                 "Returns the index of the user's personal knowledge base: "
-                "article and note titles, one-line summaries, concept tags, and tier indicators "
+                "article and note titles, one-line summaries, concept tags, source conversation titles, and tier indicators "
                 "(⚡ Deep Domain | 🎯 Active Topic | ▪ Surface Note). "
-                "Call this first to understand the user's knowledge landscape and decide which "
-                "articles are relevant to the question. "
+                "ALWAYS call this first whenever the user asks about a topic, past conversation, project, strategy, or anything they may have researched or discussed before — even if phrased as 'do you remember' or 'we talked about'. "
+                "The index contains original source conversation titles so you can match the user's phrasing to compiled articles. "
                 "This is CONTEXT for richer, more personalised answers — not the only source of truth. "
                 "Typical token cost: 300-500 tokens."
             ),
@@ -221,35 +222,58 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
 
         results = []
         terms = query.split()
+        # TODO: replace with hybrid keyword+embedding retrieval when knowledge base grows large.
+        # For 1-2 terms use OR (any match); for 3+ terms require 80% of terms to match.
+        threshold = 1 if len(terms) <= 2 else max(1, int(len(terms) * 0.8))
 
-        # Search all markdown files across deep/, active/, surface/
+        # Search all markdown files across deep/, active/, surface/, and root (fallback)
+        _NON_ARTICLE_ROOT = {"index.md", "insights.md", "concepts.md", "gaps.md", "profile.md"}
         search_dirs = ["deep", "active", "surface"]
         all_files: list[Path] = []
         for d in search_dirs:
             dpath = wiki_dir / d
             if dpath.exists():
                 all_files.extend(sorted(dpath.glob("**/*.md")))
+        # Include any article-like .md files written directly to the wiki root
+        for f in sorted(wiki_dir.glob("*.md")):
+            if f.name not in _NON_ARTICLE_ROOT:
+                all_files.append(f)
+
+        seen_titles: set[str] = set()
 
         for art_file in all_files:
             content = art_file.read_text(encoding="utf-8")
             # Strip YAML frontmatter
             body = content
+            frontmatter = ""
             if content.startswith("---"):
                 parts = content.split("---", 2)
                 body = parts[2] if len(parts) >= 3 else content
+                frontmatter = parts[1] if len(parts) >= 3 else ""
 
+            title_match = re.search(r"^#\s+(.+)$", body, re.MULTILINE)
+            title = title_match.group(1) if title_match else art_file.stem
+
+            if title in seen_titles:
+                continue
+
+            # Check title, filename, and frontmatter title field for any term match
+            title_text = (title + " " + art_file.stem.replace("-", " ") + " " + frontmatter).lower()
+            title_hit = any(t in title_text for t in terms)
+
+            # Paragraph-level search with relaxed threshold
             matching_paras = []
             for para in body.split("\n\n"):
                 para_lower = para.lower()
-                if all(t in para_lower for t in terms):
+                if sum(t in para_lower for t in terms) >= threshold:
                     clean = para.strip()
                     if len(clean) > 30:
                         matching_paras.append(clean[:400])
 
-            if matching_paras:
-                title_match = re.search(r"^#\s+(.+)$", body, re.MULTILINE)
-                title = title_match.group(1) if title_match else art_file.stem
-                results.append(f"### {title}\n\n" + "\n\n".join(matching_paras[:3]))
+            if title_hit or matching_paras:
+                seen_titles.add(title)
+                snippet = "\n\n".join(matching_paras[:3]) if matching_paras else body.strip()[:400]
+                results.append(f"### {title}\n\n{snippet}")
 
         if not results:
             return [types.TextContent(type="text", text=f"No matches found for '{query}'.")]

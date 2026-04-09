@@ -7,8 +7,15 @@ Evaluate whether an AI conversation contains substantive knowledge worth compili
 Discard: casual chat, simple one-off Q&A, debugging help on trivial code, quick task execution.
 Keep: research discussions, analysis, framework development, strategic reasoning, deep explanations, multi-turn knowledge building.
 
+For topics:
+- Return 1 topic, or 2 only if the conversation is genuinely split between two distinct domains.
+- Choose the topic that best describes what this conversation is PRIMARILY about, not every angle it touches.
+- Supporting context and adjacent themes are NOT topics.
+- Use broad 2-4 word category names (e.g. "AI Product Strategy", "Content Creation", "Personal Finance").
+- Prefer specific over generic when choosing between two equally valid topics.
+
 Respond with valid JSON only, no markdown fences.
-Schema: {"keep": true|false, "topics": ["topic1", "topic2"], "summary": "one-line summary"}
+Schema: {"keep": true|false, "topics": ["primary_topic"], "summary": "one-line summary"}
 """
 
 FILTER_USER = """\

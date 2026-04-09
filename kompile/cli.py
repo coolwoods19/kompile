@@ -467,19 +467,33 @@ def _apply_incremental_patch(patch: dict, wiki_dir: Path) -> None:
         target_dir.mkdir(exist_ok=True)
 
     for art in patch.get("new_articles", []):
-        from kompile.models import Article, ArticleSource, WikiCompilation
-        from kompile.compiler.writer import _write_articles
+        from kompile.models import Article, ArticleSource
+        from kompile.compiler.writer import _escape_yaml
+        import dataclasses
         article = Article(
             id=art["id"], title=art["title"],
             sources=[ArticleSource(**s) for s in art.get("sources", [])],
             content=art.get("content", ""), concepts=art.get("concepts", []),
             backlinks=art.get("backlinks", []),
         )
-        _write_articles(
-            WikiCompilation(title="", articles=[article], domains=[],
-                            cross_topic_concepts=[], insights=[], suggested_gaps=[]),
-            target_dir,
-        )
+        # article.id may contain path segments (e.g. "deep/domain/slug")
+        out_path = wiki_dir / f"{article.id}.md"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        fm_sources = [dataclasses.asdict(s) for s in article.sources]
+        frontmatter = "---\n" f'title: "{_escape_yaml(article.title)}"\n' "sources:\n"
+        for s in fm_sources:
+            frontmatter += (
+                f"  - platform: {s['platform']}\n"
+                f"    title: \"{_escape_yaml(s['title'])}\"\n"
+                f"    date: {s['date']}\n"
+            )
+        if article.concepts:
+            frontmatter += f"concepts: [{', '.join(article.concepts)}]\n"
+        if article.backlinks:
+            frontmatter += f"backlinks: [{', '.join(article.backlinks)}]\n"
+        frontmatter += "---\n\n"
+        body = f"# {article.title}\n\n{article.content}\n"
+        out_path.write_text(frontmatter + body, encoding="utf-8")
 
     for updated in patch.get("updated_articles", []):
         # Search for the article across the wiki
@@ -500,6 +514,25 @@ def _apply_incremental_patch(patch: dict, wiki_dir: Path) -> None:
         for ins in patch["new_insights"]:
             existing += f"- {ins}\n\n"
         insights_file.write_text(existing, encoding="utf-8")
+
+    # Append new articles to index.md so MCP get_index reflects them immediately
+    new_articles = patch.get("new_articles", [])
+    if new_articles:
+        index_file = wiki_dir / "index.md"
+        if index_file.exists():
+            index_text = index_file.read_text(encoding="utf-8")
+            # Insert before "## Surface Notes" if present, otherwise append
+            insert_marker = "## Surface Notes"
+            entries = ""
+            for art in new_articles:
+                concepts = ", ".join(art.get("concepts", []))
+                rel_path = f"{art['id']}.md"
+                entries += f"- **🎯 [{art['title']}]({rel_path})** | {concepts}\n"
+            if insert_marker in index_text:
+                index_text = index_text.replace(insert_marker, entries + "\n" + insert_marker)
+            else:
+                index_text += "\n" + entries
+            index_file.write_text(index_text, encoding="utf-8")
 
 
 @cli.command()
