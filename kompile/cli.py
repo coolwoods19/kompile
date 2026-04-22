@@ -137,7 +137,7 @@ def filter_cmd(ctx):
         click.echo(f"Filtering {len(unfiltered)} sources with {model}...")
 
         results = []
-        from kompile.models import Source
+        from kompile.models import Source, FilterResult
         for i, sid in enumerate(sorted(unfiltered), 1):
             src_file = raw_dir / f"{sid}.txt"
             if not src_file.exists():
@@ -155,12 +155,17 @@ def filter_cmd(ctx):
                 metadata=src_data.get("metadata", {}),
             )
 
-            result = filter_source(source, client, model)
+            try:
+                result = filter_source(source, client, model)
+            except ValueError as exc:
+                click.echo(f"  [{i}/{len(unfiltered)}] {source.title[:60]} → ✗ skip (parse error: {exc})", err=True)
+                result = FilterResult(source_id=source.id, keep=False, topics=[], summary=f"[filter error: {exc}]")
             results.append(result)
+            state_add_filter_results(state, [result])
+            save_state(root, state)
             status = "✓ keep" if result.keep else "✗ discard"
             click.echo(f"  [{i}/{len(unfiltered)}] {source.title[:60]} → {status} | {result.summary[:80]}")
 
-        state_add_filter_results(state, results)
         kept = sum(1 for r in results if r.keep)
         click.echo(f"\nFiltered {len(results)} sources: {kept} kept, {len(results)-kept} discarded.")
 
@@ -182,7 +187,7 @@ def filter_cmd(ctx):
 @click.pass_context
 def compile(ctx, incremental):
     """Run full tiered compilation pipeline → wiki/ directory."""
-    from kompile.models import Source, TieredWiki, SurfaceNote, Concept, Insight, Gap
+    from kompile.models import Source, TieredWiki, SurfaceNote, Concept, Insight, Gap, FilterResult
     from kompile.compiler.filter import filter_source
     from kompile.compiler.classify import classify_topics
     from kompile.compiler.summarize import summarize_source
@@ -219,12 +224,16 @@ def compile(ctx, incremental):
                 url=src_data.get("metadata", {}).get("url"),
                 metadata=src_data.get("metadata", {}),
             )
-            result = filter_source(source, client, cfg["models"]["filter"])
+            try:
+                result = filter_source(source, client, cfg["models"]["filter"])
+            except ValueError as exc:
+                click.echo(f"  ✗ skip {source.title[:60]} (parse error: {exc})", err=True)
+                result = FilterResult(source_id=source.id, keep=False, topics=[], summary=f"[filter error: {exc}]")
             results.append(result)
+            state_add_filter_results(state, [result])
+            save_state(root, state)
             status = "✓" if result.keep else "✗"
             click.echo(f"  {status} {source.title[:60]}")
-        state_add_filter_results(state, results)
-        save_state(root, state)
 
     # ------------------------------------------------------------------ #
     # Step 2: Classify topics (if not already done or new sources added)
