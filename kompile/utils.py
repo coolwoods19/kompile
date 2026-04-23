@@ -87,6 +87,9 @@ def parse_llm_json(raw: str) -> dict | list:
     result = repair_json(text, return_objects=True)
     if not isinstance(result, (dict, list)):
         raise ValueError(f"Expected JSON object or array, got: {type(result)}")
+    # Unwrap single-element list wrapping a dict (common LLM mistake)
+    if isinstance(result, list) and len(result) == 1 and isinstance(result[0], dict):
+        result = result[0]
     return result
 
 

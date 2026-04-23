@@ -5,7 +5,7 @@ api_key: ""  # or set ANTHROPIC_API_KEY env var
 
 models:
   filter: "claude-haiku-4-5-20251001"       # cheap + fast: filtering and tagging
-  summarize: "claude-sonnet-4-20250514"     # mid-range: per-source extraction
+  summarize: "claude-haiku-4-5-20251001"    # fast + cheap: per-source extraction
   compile: "claude-sonnet-4-20250514"       # mid-range: cross-source synthesis
   query: "claude-sonnet-4-20250514"         # mid-range: MCP Q&A and demo Q&A
 
