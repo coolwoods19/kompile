@@ -5,7 +5,10 @@ import dataclasses
 import json
 from pathlib import Path
 
-from kompile.models import FilterResult, SourceSummary, Claim
+from kompile.models import (
+    ActiveNote, ArticleSource, Claim, FilterResult, SourceSummary,
+    WikiCompilation, Domain, Subtopic, Article, Concept, Insight, Gap,
+)
 
 
 _STATE_FILE = ".kompile_state.json"
@@ -17,6 +20,8 @@ def _default_state() -> dict:
         "filter_results": {},     # id → {source_id, keep, topics, summary}
         "summaries": {},          # id → SourceSummary as dict
         "tier_classifications": {},  # topic → {sources: [...], tier: "deep"|"active"|"surface"}
+        "compiled_domains": {},   # topic → WikiCompilation as dict
+        "compiled_active_topics": {},  # topic → ActiveNote as dict
     }
 
 
@@ -24,9 +29,12 @@ def load_state(root: Path) -> dict:
     p = root / _STATE_FILE
     if p.exists():
         state = json.loads(p.read_text(encoding="utf-8"))
-        # Backfill key for states written before tier_classifications was added
         if "tier_classifications" not in state:
             state["tier_classifications"] = {}
+        if "compiled_domains" not in state:
+            state["compiled_domains"] = {}
+        if "compiled_active_topics" not in state:
+            state["compiled_active_topics"] = {}
         return state
     return _default_state()
 
@@ -87,6 +95,60 @@ def state_add_tier_classifications(state: dict, classifications: dict) -> None:
 def state_get_tier_classifications(state: dict) -> dict:
     """Return stored tier classifications."""
     return state.get("tier_classifications", {})
+
+
+def state_add_compiled_domain(state: dict, topic: str, wiki: WikiCompilation) -> None:
+    state.setdefault("compiled_domains", {})[topic] = dataclasses.asdict(wiki)
+
+
+def state_add_compiled_active(state: dict, topic: str, note: ActiveNote) -> None:
+    state.setdefault("compiled_active_topics", {})[topic] = dataclasses.asdict(note)
+
+
+def state_get_compiled_domains(state: dict) -> dict[str, WikiCompilation]:
+    result = {}
+    for topic, d in state.get("compiled_domains", {}).items():
+        articles = [
+            Article(
+                id=a["id"], title=a["title"], content=a["content"],
+                concepts=a.get("concepts", []), backlinks=a.get("backlinks", []),
+                sources=[ArticleSource(**s) for s in a.get("sources", [])],
+            )
+            for a in d.get("articles", [])
+        ]
+        domains = [
+            Domain(name=dom["name"], subtopics=[Subtopic(**st) for st in dom.get("subtopics", [])])
+            for dom in d.get("domains", [])
+        ]
+        result[topic] = WikiCompilation(
+            title=d.get("title", topic),
+            domain_name=d.get("domain_name", topic),
+            domains=domains,
+            articles=articles,
+            cross_topic_concepts=[Concept(**c) for c in d.get("cross_topic_concepts", [])],
+            insights=[Insight(**i) for i in d.get("insights", [])],
+            suggested_gaps=[Gap(**g) for g in d.get("suggested_gaps", [])],
+        )
+    return result
+
+
+def state_get_compiled_active_topics(state: dict) -> dict[str, ActiveNote]:
+    result = {}
+    for topic, d in state.get("compiled_active_topics", {}).items():
+        result[topic] = ActiveNote(
+            topic=d["topic"],
+            sources=[ArticleSource(**s) for s in d.get("sources", [])],
+            note=d.get("note", ""),
+            concepts=d.get("concepts", []),
+            related_domains=d.get("related_domains", []),
+        )
+    return result
+
+
+def state_clear_compiled(state: dict) -> None:
+    """Clear compile-stage checkpoints (call before a fresh full compile)."""
+    state["compiled_domains"] = {}
+    state["compiled_active_topics"] = {}
 
 
 def state_unfiltered_source_ids(state: dict) -> set[str]:

@@ -25,6 +25,7 @@ def summarize_source(
         date=source.date,
         content=content,
     )
+    last_exc: Exception | None = None
     for attempt in range(5):
         try:
             response = client.messages.create(
@@ -33,40 +34,45 @@ def summarize_source(
                 system=SUMMARIZE_SYSTEM,
                 messages=[{"role": "user", "content": user_msg}],
             )
-            break
         except anthropic.RateLimitError:
             if attempt == 4:
                 raise
-            wait = 60 * (attempt + 1)
-            print(f"    Rate limited — waiting {wait}s before retry...")
+            import random
+            wait = 60 * (attempt + 1) + random.uniform(0, 15)
+            print(f"    Rate limited — waiting {wait:.0f}s before retry...")
             time.sleep(wait)
-    try:
-        data = parse_llm_json(response.content[0].text)
-    except Exception as e:
-        print(f"    Warning: bad JSON for '{source.title[:60]}': {e}")
+            continue
+        try:
+            data = parse_llm_json(response.content[0].text)
+            if not isinstance(data, dict):
+                raise ValueError(f"expected dict, got {type(data).__name__}")
+        except ValueError as e:
+            last_exc = e
+            continue
+        claims = [
+            Claim(
+                text=c["text"],
+                type=c.get("type", "fact"),
+                confidence=c.get("confidence", "stated"),
+            )
+            for c in data.get("claims", [])
+            if isinstance(c, dict) and "text" in c
+        ]
         return SourceSummary(
-            source_id=source.id, platform=source.platform,
-            title=source.title, date=source.date,
-            claims=[], frameworks=[], key_terms=[],
+            source_id=source.id,
+            platform=source.platform,
+            title=source.title,
+            date=source.date,
+            claims=claims,
+            frameworks=data.get("frameworks", []),
+            key_terms=data.get("key_terms", []),
         )
 
-    claims = [
-        Claim(
-            text=c["text"],
-            type=c.get("type", "fact"),
-            confidence=c.get("confidence", "stated"),
-        )
-        for c in data.get("claims", [])
-    ]
-
+    print(f"    Warning: bad JSON after 5 attempts for '{source.title[:60]}': {last_exc}")
     return SourceSummary(
-        source_id=source.id,
-        platform=source.platform,
-        title=source.title,
-        date=source.date,
-        claims=claims,
-        frameworks=data.get("frameworks", []),
-        key_terms=data.get("key_terms", []),
+        source_id=source.id, platform=source.platform,
+        title=source.title, date=source.date,
+        claims=[], frameworks=[], key_terms=[],
     )
 
 

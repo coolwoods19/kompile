@@ -65,6 +65,7 @@ def _parse_domain_wiki(data: dict, domain_name: str, known_ids: set[str]) -> Wik
     subtopics = [
         Subtopic(name=st["name"], article_ids=[_unique_id(aid) for aid in st.get("article_ids", [])])
         for st in data.get("subtopics", [])
+        if isinstance(st, dict) and st.get("name")
     ]
     domains = [Domain(name=data.get("domain", domain_name), subtopics=subtopics)]
 
@@ -76,11 +77,18 @@ def _parse_domain_wiki(data: dict, domain_name: str, known_ids: set[str]) -> Wik
 
     articles = []
     for a in data.get("articles", []):
+        if not isinstance(a, dict) or not a.get("id"):
+            continue
         art_id = orig_to_new.get(a["id"], _unique_id(a["id"]))
+        raw_sources = [s for s in a.get("sources", []) if isinstance(s, dict)]
         articles.append(Article(
             id=art_id,
-            title=a["title"],
-            sources=[ArticleSource(**s) for s in a.get("sources", [])],
+            title=a.get("title", art_id),
+            sources=[ArticleSource(
+                platform=s.get("platform", ""),
+                title=s.get("title", ""),
+                date=s.get("date", ""),
+            ) for s in raw_sources],
             content=a.get("content", ""),
             concepts=a.get("concepts", []),
             backlinks=a.get("backlinks", []),
@@ -89,10 +97,12 @@ def _parse_domain_wiki(data: dict, domain_name: str, known_ids: set[str]) -> Wik
     insights = [
         Insight(text=ins["text"], sources=ins.get("sources", []))
         for ins in data.get("insights", [])
+        if isinstance(ins, dict) and "text" in ins
     ]
     gaps = [
         Gap(gap=g["gap"], detail=g.get("detail", ""))
         for g in data.get("suggested_gaps", [])
+        if isinstance(g, dict) and "gap" in g
     ]
 
     return WikiCompilation(
@@ -115,14 +125,24 @@ def _call_compile_domain(
 ) -> WikiCompilation:
     summaries_json = json.dumps(_summaries_to_dict(summaries), ensure_ascii=False, indent=2)
     user_msg = COMPILE_USER.format(domain_name=domain_name, summaries_json=summaries_json)
-    response = client.messages.create(
-        model=model,
-        max_tokens=16000,
-        system=COMPILE_SYSTEM,
-        messages=[{"role": "user", "content": user_msg}],
-    )
-    data = parse_llm_json(response.content[0].text)
-    return _parse_domain_wiki(data, domain_name, known_ids)
+    last_exc: Exception | None = None
+    for attempt in range(3):
+        response = client.messages.create(
+            model=model,
+            max_tokens=16000,
+            system=COMPILE_SYSTEM,
+            messages=[{"role": "user", "content": user_msg}],
+        )
+        try:
+            data = parse_llm_json(response.content[0].text)
+            if not isinstance(data, dict):
+                raise ValueError(f"expected dict, got {type(data).__name__}")
+        except ValueError as exc:
+            last_exc = exc
+            continue
+        return _parse_domain_wiki(data, domain_name, known_ids)
+    print(f"    Warning: bad JSON after 3 attempts for domain '{domain_name}': {last_exc}")
+    return WikiCompilation(title=domain_name, domain_name=domain_name)
 
 
 def _merge_wikis(wikis: list[WikiCompilation]) -> WikiCompilation:
@@ -212,13 +232,25 @@ def compile_active_topic(
     """Compile summaries for one Active Topic into a single synthesized note."""
     summaries_json = json.dumps(_summaries_to_dict(summaries), ensure_ascii=False, indent=2)
     user_msg = ACTIVE_COMPILE_USER.format(topic_name=topic_name, summaries_json=summaries_json)
-    response = client.messages.create(
-        model=model,
-        max_tokens=4096,
-        system=ACTIVE_COMPILE_SYSTEM,
-        messages=[{"role": "user", "content": user_msg}],
-    )
-    data = parse_llm_json(response.content[0].text)
+    last_exc: Exception | None = None
+    data: dict = {}
+    for attempt in range(3):
+        response = client.messages.create(
+            model=model,
+            max_tokens=4096,
+            system=ACTIVE_COMPILE_SYSTEM,
+            messages=[{"role": "user", "content": user_msg}],
+        )
+        try:
+            parsed = parse_llm_json(response.content[0].text)
+            if not isinstance(parsed, dict):
+                raise ValueError(f"expected dict, got {type(parsed).__name__}")
+            data = parsed
+            break
+        except ValueError as exc:
+            last_exc = exc
+    if last_exc and not data:
+        print(f"    Warning: bad JSON after 3 attempts for active topic '{topic_name}': {last_exc}")
 
     # Collect sources from all input summaries
     sources = [
@@ -253,13 +285,23 @@ def compile_cross_domain(
         active_topic_related_domains: {topic_slug: [domain_name, ...]}
     """
     user_msg = CROSS_DOMAIN_USER.format(lightweight_index=lightweight_index)
-    response = client.messages.create(
-        model=model,
-        max_tokens=4096,
-        system=CROSS_DOMAIN_SYSTEM,
-        messages=[{"role": "user", "content": user_msg}],
-    )
-    return parse_llm_json(response.content[0].text)
+    last_exc: Exception | None = None
+    for attempt in range(3):
+        response = client.messages.create(
+            model=model,
+            max_tokens=4096,
+            system=CROSS_DOMAIN_SYSTEM,
+            messages=[{"role": "user", "content": user_msg}],
+        )
+        try:
+            data = parse_llm_json(response.content[0].text)
+            if not isinstance(data, dict):
+                raise ValueError(f"expected dict, got {type(data).__name__}")
+            return data
+        except ValueError as exc:
+            last_exc = exc
+    print(f"    Warning: bad JSON after 3 attempts for cross-domain pass: {last_exc}")
+    return {}
 
 
 def compile_incremental(
@@ -280,10 +322,20 @@ def compile_incremental(
         index_content=index_content,
         new_summary_json=new_summary_json,
     )
-    response = client.messages.create(
-        model=model,
-        max_tokens=4096,
-        system=INCREMENTAL_SYSTEM,
-        messages=[{"role": "user", "content": user_msg}],
-    )
-    return parse_llm_json(response.content[0].text)
+    last_exc: Exception | None = None
+    for attempt in range(3):
+        response = client.messages.create(
+            model=model,
+            max_tokens=4096,
+            system=INCREMENTAL_SYSTEM,
+            messages=[{"role": "user", "content": user_msg}],
+        )
+        try:
+            data = parse_llm_json(response.content[0].text)
+            if not isinstance(data, dict):
+                raise ValueError(f"expected dict, got {type(data).__name__}")
+            return data
+        except ValueError as exc:
+            last_exc = exc
+    print(f"    Warning: bad JSON after 3 attempts for incremental compile: {last_exc}")
+    return {}

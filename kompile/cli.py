@@ -12,6 +12,9 @@ from kompile.state import (
     state_add_sources, state_add_filter_results, state_add_summaries,
     state_get_summaries, state_unfiltered_source_ids,
     state_add_tier_classifications, state_get_tier_classifications,
+    state_add_compiled_domain, state_add_compiled_active,
+    state_get_compiled_domains, state_get_compiled_active_topics,
+    state_clear_compiled,
 )
 
 
@@ -264,12 +267,16 @@ def compile(ctx, incremental):
     }
 
     if unsummarized:
-        click.echo(f"\nSummarizing {len(unsummarized)} sources (deep + active only)...")
-        new_summaries = []
-        for i, sid in enumerate(sorted(unsummarized), 1):
+        import threading
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        click.echo(f"\nSummarizing {len(unsummarized)} sources (deep + active only, 5 workers)...")
+        _lock = threading.Lock()
+        _counter = [0]
+
+        def _summarize_one(sid):
             src_file = raw_dir / f"{sid}.txt"
             if not src_file.exists():
-                continue
+                return None
             src_data = state["sources"].get(sid, {})
             source = Source(
                 id=sid, platform=src_data.get("platform", "manual"),
@@ -278,11 +285,18 @@ def compile(ctx, incremental):
                 url=src_data.get("metadata", {}).get("url"),
                 metadata=src_data.get("metadata", {}),
             )
-            click.echo(f"  [{i}/{len(unsummarized)}] Summarizing: {source.title[:60]}...")
-            summary = summarize_source(source, client, cfg["models"]["summarize"])
-            new_summaries.append(summary)
-        state_add_summaries(state, new_summaries)
-        save_state(root, state)
+            return summarize_source(source, client, cfg["models"]["summarize"])
+
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = {executor.submit(_summarize_one, sid): sid for sid in sorted(unsummarized)}
+            for future in as_completed(futures):
+                summary = future.result()
+                if summary:
+                    with _lock:
+                        _counter[0] += 1
+                        state_add_summaries(state, [summary])
+                        save_state(root, state)
+                        click.echo(f"  [{_counter[0]}/{len(unsummarized)}] Done: {summary.title[:60]}")
 
     # Build summary lookup
     all_summaries = {s.source_id: s for s in state_get_summaries(state)}
@@ -307,6 +321,21 @@ def compile(ctx, incremental):
     # ------------------------------------------------------------------ #
     # Step 4: Full tiered compilation
     # ------------------------------------------------------------------ #
+    import shutil
+
+    # Load any previously checkpointed compile results (crash resume)
+    prior_domains = state_get_compiled_domains(state)
+    prior_active = state_get_compiled_active_topics(state)
+
+    # Fresh compile: clear stale wiki dirs and compile checkpoints
+    is_fresh = not prior_domains and not prior_active
+    if is_fresh:
+        for subdir in ("deep", "active", "surface"):
+            p = wiki_dir / subdir
+            if p.exists():
+                shutil.rmtree(p)
+            p.mkdir(parents=True, exist_ok=True)
+
     known_article_ids: set[str] = set()
     deep_domain_wikis = []
     active_notes = []
@@ -317,6 +346,12 @@ def compile(ctx, incremental):
     if deep_topics:
         click.echo(f"\nCompiling {len(deep_topics)} deep domain(s)...")
     for topic, info in deep_topics.items():
+        if topic in prior_domains:
+            click.echo(f"  Resuming '{topic}' from checkpoint")
+            domain_wiki = prior_domains[topic]
+            known_article_ids.update(a.id for a in domain_wiki.articles)
+            deep_domain_wikis.append(domain_wiki)
+            continue
         topic_summaries = [all_summaries[sid] for sid in info["sources"] if sid in all_summaries]
         if not topic_summaries:
             click.echo(f"  Skipping '{topic}' (no summaries available)")
@@ -328,12 +363,18 @@ def compile(ctx, incremental):
             progress_cb=lambda msg: click.echo(f"    {msg}"),
         )
         deep_domain_wikis.append(domain_wiki)
+        state_add_compiled_domain(state, topic, domain_wiki)
+        save_state(root, state)
 
     # -- Active topics --
     active_topics = {t: info for t, info in tier_classifications.items() if info["tier"] == "active"}
     if active_topics:
         click.echo(f"\nCompiling {len(active_topics)} active topic(s)...")
     for topic, info in active_topics.items():
+        if topic in prior_active:
+            click.echo(f"  Resuming '{topic}' from checkpoint")
+            active_notes.append(prior_active[topic])
+            continue
         topic_summaries = [all_summaries[sid] for sid in info["sources"] if sid in all_summaries]
         if not topic_summaries:
             click.echo(f"  Skipping '{topic}' (no summaries available)")
@@ -341,6 +382,8 @@ def compile(ctx, incremental):
         click.echo(f"  Compiling active topic: {topic} ({len(topic_summaries)} summaries)...")
         note = compile_active_topic(topic_summaries, topic, client, cfg["models"]["compile"])
         active_notes.append(note)
+        state_add_compiled_active(state, topic, note)
+        save_state(root, state)
 
     # -- Surface notes (no compilation — use Haiku filter summary) --
     surface_topics = {t: info for t, info in tier_classifications.items() if info["tier"] == "surface"}
@@ -411,6 +454,10 @@ def compile(ctx, incremental):
 
     click.echo(f"\nWriting wiki to {wiki_dir}/...")
     write_wiki(tiered_wiki, wiki_dir)
+
+    # Compile succeeded — clear checkpoints so next run starts fresh
+    state_clear_compiled(state)
+    save_state(root, state)
 
     # Summary
     total_articles = sum(len(d.articles) for d in deep_domain_wikis)
